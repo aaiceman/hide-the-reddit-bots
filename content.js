@@ -4,9 +4,9 @@
 
 const DEFAULT_SETTINGS = { thresholdDays: 30, showAges: true, hideYoung: true };
 const NEG_CACHE_MS = 60 * 60 * 1000; // retry failed lookups after 1 hour
-const MAX_CONCURRENT = 5;
-const DEQUEUE_DELAY_MS = 150;
-const BACKOFF_MS = 30 * 1000; // pause after a 429
+const MAX_CONCURRENT = 1; // strictly serial — Reddit rate-limits aggressively
+const DEQUEUE_DELAY_MS = 1200; // ~0.8 requests/second
+const BACKOFF_MS = 5 * 60 * 1000; // pause 5 minutes after a 429
 
 let settings = { ...DEFAULT_SETTINGS };
 
@@ -180,7 +180,12 @@ async function fetchUser(name) {
       { credentials: "same-origin" }
     );
     if (resp.status === 429) {
-      backoffUntil = Date.now() + BACKOFF_MS;
+      // honor Retry-After when Reddit provides it, else back off BACKOFF_MS
+      const retryAfter = parseInt(resp.headers.get("Retry-After"), 10);
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : BACKOFF_MS;
+      backoffUntil = Date.now() + waitMs;
       queued.delete(name);
       if (!retriedOnce.has(name)) {
         retriedOnce.add(name);
