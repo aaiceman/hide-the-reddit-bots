@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: sans-serif; font-size: 14px; padding: 12px; min-width: 340px; }
+  label { display: block; margin: 10px 0; }
+  input[type="number"] { width: 70px; }
+  .hint { color: #666; font-size: 12px; margin-top: 12px; }
+</style>
+</head>
+<body>
+  <label><input type="checkbox" id="showAges"> Show account-age labels next to usernames</label>
+  <label><input type="checkbox" id="hideYoung"> Hide posts/comments from young accounts</label>
+  <label>Hide accounts younger than <input type="number" id="thresholdDays" min="1" max="3650"> days</label>
+  <div class="hint">Changes apply immediately to open Reddit tabs. Accounts whose age can't be determined show [?] and are never hidden.</div>
+  <script src="options.js"></script>
+</body>
+</html>
