@@ -217,8 +217,16 @@ function ensureSpan(link) {
 function setHidden(link, hidden) {
   const container = link.closest(".thing");
   if (!container) return;
-  if (hidden) container.classList.add("hrb-hidden");
-  else container.classList.remove("hrb-hidden");
+  if (hidden) {
+    container.classList.add("hrb-hidden");
+    if (!container.dataset.hrbHiddenCounted) {
+      container.dataset.hrbHiddenCounted = "1";
+      const sub = subredditOfThing(container);
+      if (sub) bumpHidden(sub);
+    }
+  } else {
+    container.classList.remove("hrb-hidden");
+  }
 }
 
 // state: {kind: "pending"|"unknown"|"verified"|"estimated", days?, floor?}
@@ -316,6 +324,12 @@ function processNewAuthors() {
     }
     set.add(link);
     harvestIdFromThing(link);
+    const thing = link.closest(".thing");
+    if (thing && !thing.dataset.hrbSeen) {
+      thing.dataset.hrbSeen = "1";
+      const sub = subredditOfThing(thing);
+      if (sub) bumpSeen(sub);
+    }
     fresh.push(lower);
   }
   if (fresh.length) resolveUsers([...new Set(fresh)]);
