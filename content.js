@@ -1,24 +1,48 @@
 "use strict";
 
 // ===== Hide the Reddit Bots — content script (old Reddit layout) =====
+// v1.1.0: ID-anchor age estimation + slow verify queue + LRU cache trim.
+//
+// Resolution pipeline per author:
+//   1. verified cache (permanent — creation dates never change)
+//   2. estimate from account-ID anchors: if an anchor with a HIGHER id is
+//      already comfortably old, this account is at least as old (IDs increase
+//      monotonically with registration) -> label [~X years], zero requests.
+//      Estimates NEVER hide; hiding requires a verified age.
+//   3. slow verify queue (~1 req / 7 s) — only possibly-young or unestimable
+//      accounts. Every verification adds an anchor, so demand collapses as
+//      calibration builds.
 
 const DEFAULT_SETTINGS = { thresholdDays: 30, showAges: true, hideYoung: true };
 const NEG_CACHE_MS = 60 * 60 * 1000; // retry failed lookups after 1 hour
-const MAX_CONCURRENT = 1; // strictly serial — Reddit rate-limits aggressively
-const DEQUEUE_DELAY_MS = 1200; // ~0.8 requests/second
-const BACKOFF_MS = 5 * 60 * 1000; // pause 5 minutes after a 429
+const VERIFY_INTERVAL_MS = 7000; // ~8.5 requests/minute, strictly serial
+const BACKOFF_MS = 5 * 60 * 1000; // after a 429 without Retry-After
+const SAFE_OLD_BASE_DAYS = 180; // estimation exemption floor
+const MAX_ANCHORS = 800;
+const TRIM_LIMIT = 50000; // entries that trigger a trim
+const TRIM_KEEP = 40000; // entries kept after a trim
 
 let settings = { ...DEFAULT_SETTINGS };
 
-// username(lowercase) -> { c: created_utc_seconds | null, t: checkedAt_ms }
+// username(lowercase) -> { c: created_utc|null, t: verifiedAt_ms, id: accountIdNum|undefined, s: lastSeenDay }
 const memCache = new Map();
 // username(lowercase) -> Set<HTMLAnchorElement>
 const registry = new Map();
+// username(lowercase) -> accountIdNum harvested from DOM / page JSON this session
+const idMap = new Map();
 const fetchQueue = [];
 const queued = new Set();
 const retriedOnce = new Set();
-let activeFetches = 0;
+let fetchBusy = false;
 let backoffUntil = 0;
+let pageJsonTried = false;
+// sorted ascending by id: [[idNum, created_utc_seconds], ...]
+let anchors = [];
+let entryCount = 0;
+let trimRunning = false;
+
+const today = () => Math.floor(Date.now() / 86400000);
+const safeOldDays = () => Math.max(SAFE_OLD_BASE_DAYS, settings.thresholdDays * 2);
 
 // ----- styles -----
 const style = document.createElement("style");
@@ -28,87 +52,198 @@ style.textContent = `
 `;
 document.documentElement.appendChild(style);
 
-// ----- age math / colors (same scale as the original RES patch) -----
-function ageInfo(createdUtcSeconds) {
-  const days = Math.floor((Date.now() / 1000 - createdUtcSeconds) / 86400);
-  let text;
+// ----- age math / colors -----
+function ageDays(createdUtcSeconds) {
+  return Math.floor((Date.now() / 1000 - createdUtcSeconds) / 86400);
+}
+
+function ageText(days) {
   if (days >= 365) {
     const y = Math.floor(days / 365);
-    text = `[${y} year${y > 1 ? "s" : ""}]`;
-  } else if (days >= 30) {
-    const m = Math.floor(days / 30);
-    text = `[${m} month${m > 1 ? "s" : ""}]`;
-  } else {
-    text = `[${days} day${days === 1 ? "" : "s"}]`;
+    return `${y} year${y > 1 ? "s" : ""}`;
   }
-  let color = "#888888";
-  if (days <= 90) color = "#ff0000";
-  else if (days <= 365) color = "#e63939";
-  else if (days <= 1095) color = "#cc6666";
-  else if (days <= 1825) color = "#b38080";
-  else if (days <= 2190) color = "#a38585";
-  return { days, text, color };
+  if (days >= 30) {
+    const m = Math.floor(days / 30);
+    return `${m} month${m > 1 ? "s" : ""}`;
+  }
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
+function ageColor(days) {
+  if (days <= 90) return "#ff0000";
+  if (days <= 365) return "#e63939";
+  if (days <= 1095) return "#cc6666";
+  if (days <= 1825) return "#b38080";
+  if (days <= 2190) return "#a38585";
+  return "#888888";
 }
 
 function keyFor(name) {
   return "age:" + name;
 }
 
+function idFromFullname(fullname) {
+  if (typeof fullname !== "string" || !fullname.startsWith("t2_")) return undefined;
+  const n = parseInt(fullname.slice(3), 36);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+// ----- anchors (id <-> creation-date calibration) -----
+function anchorInsertPos(id) {
+  let lo = 0,
+    hi = anchors.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (anchors[mid][0] < id) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function addAnchor(id, created) {
+  if (!Number.isFinite(id) || !Number.isFinite(created)) return;
+  const pos = anchorInsertPos(id);
+  // skip if a nearby anchor already covers this point (within 3 days)
+  for (const nb of [anchors[pos - 1], anchors[pos]]) {
+    if (nb && Math.abs(nb[1] - created) < 3 * 86400) return;
+  }
+  anchors.splice(pos, 0, [id, created]);
+  if (anchors.length > MAX_ANCHORS) {
+    // drop the anchor in the densest time region
+    let best = 1,
+      bestGap = Infinity;
+    for (let i = 1; i < anchors.length - 1; i++) {
+      const gap = anchors[i + 1][1] - anchors[i - 1][1];
+      if (gap < bestGap) {
+        bestGap = gap;
+        best = i;
+      }
+    }
+    anchors.splice(best, 1);
+  }
+  browser.storage.local.set({ anchors });
+}
+
+// Returns {days, floor:boolean} when the account is PROVABLY at least
+// safeOldDays old (an anchor with id >= this id is itself that old), else null.
+function estimateOld(id) {
+  if (!Number.isFinite(id) || !anchors.length) return null;
+  const pos = anchorInsertPos(id);
+  if (pos >= anchors.length) return null; // newer than all anchors — unbounded
+  const upper = anchors[pos]; // smallest anchor id >= id
+  const minDays = ageDays(upper[1]); // account is AT LEAST this old
+  if (minDays <= safeOldDays()) return null;
+  if (pos > 0) {
+    // interpolate for a nicer display value; the bound above is what we trust
+    const [aId, aC] = anchors[pos - 1];
+    const [bId, bC] = upper;
+    const created = bId === aId ? bC : aC + ((id - aId) * (bC - aC)) / (bId - aId);
+    return { days: ageDays(created), floor: false };
+  }
+  return { days: minDays, floor: true }; // older than our oldest anchor
+}
+
 // ----- rendering -----
-function applyToElement(link, entry) {
-  // age label span sits immediately after the author link
+function ensureSpan(link) {
   let span = link.nextElementSibling;
   if (!(span && span.classList && span.classList.contains("hrb-age"))) {
     span = document.createElement("span");
     span.className = "hrb-age";
     link.after(span);
   }
-  if (!settings.showAges) {
-    span.textContent = "";
-  } else if (entry === undefined || entry === null) {
-    span.textContent = "[…]"; // pending
-    span.style.color = "#888888";
-  } else if (entry.c == null) {
-    span.textContent = "[?]"; // unknown age — never hidden
-    span.style.color = "#888888";
-  } else {
-    const info = ageInfo(entry.c);
-    span.textContent = info.text;
-    span.style.color = info.color;
-  }
-  // hide / unhide the enclosing post or comment
-  const container = link.closest(".thing");
-  if (!container) return;
-  const young =
-    entry != null && entry.c != null && ageInfo(entry.c).days < settings.thresholdDays;
-  if (young && settings.hideYoung) {
-    container.classList.add("hrb-hidden");
-  } else {
-    container.classList.remove("hrb-hidden");
-  }
+  return span;
 }
 
-function applyToUser(name) {
+function setHidden(link, hidden) {
+  const container = link.closest(".thing");
+  if (!container) return;
+  if (hidden) container.classList.add("hrb-hidden");
+  else container.classList.remove("hrb-hidden");
+}
+
+// state: {kind: "pending"|"unknown"|"verified"|"estimated", days?, floor?}
+function renderElement(link, state) {
+  const span = ensureSpan(link);
+  if (!settings.showAges && state.kind !== "verified") {
+    span.textContent = "";
+  } else if (state.kind === "pending") {
+    span.textContent = "[…]";
+    span.style.color = "#888888";
+  } else if (state.kind === "unknown") {
+    span.textContent = "[?]";
+    span.style.color = "#888888";
+  } else if (state.kind === "estimated") {
+    span.textContent = settings.showAges
+      ? `[~${ageText(state.days)}${state.floor ? "+" : ""}]`
+      : "";
+    span.style.color = ageColor(state.days);
+  } else {
+    // verified
+    span.textContent = settings.showAges ? `[${ageText(state.days)}]` : "";
+    span.style.color = ageColor(state.days);
+  }
+  // only VERIFIED ages may hide
+  const young = state.kind === "verified" && state.days < settings.thresholdDays;
+  setHidden(link, young && settings.hideYoung);
+}
+
+function stateFor(name) {
   const entry = memCache.get(name);
+  if (entry && entry.c != null) return { kind: "verified", days: ageDays(entry.c) };
+  const id = idMap.get(name) ?? (entry ? entry.id : undefined);
+  const est = estimateOld(id);
+  if (est) return { kind: "estimated", days: est.days, floor: est.floor };
+  if (entry && entry.c == null && entry.t > 0 && Date.now() - entry.t < NEG_CACHE_MS) {
+    return { kind: "unknown" };
+  }
+  return { kind: "pending" };
+}
+
+function renderUser(name) {
   const set = registry.get(name);
   if (!set) return;
+  const state = stateFor(name);
   for (const link of set) {
     if (!link.isConnected) {
-      set.delete(link); // drop references to removed DOM
+      set.delete(link);
       continue;
     }
-    applyToElement(link, entry);
+    renderElement(link, state);
   }
+  if (state.kind === "pending" && !queued.has(name)) enqueueVerify(name);
 }
 
 function reapplyAll() {
-  for (const name of registry.keys()) applyToUser(name);
+  // settings/anchors changed: prune queue entries that no longer need verifying
+  for (let i = fetchQueue.length - 1; i >= 0; i--) {
+    const name = fetchQueue[i];
+    const k = stateFor(name).kind;
+    if (k === "verified" || k === "estimated") {
+      fetchQueue.splice(i, 1);
+      queued.delete(name);
+    }
+  }
+  for (const name of registry.keys()) renderUser(name);
 }
 
 // ----- discovery -----
+function harvestIdFromThing(link) {
+  const thing = link.closest(".thing");
+  if (!thing || !thing.dataset) return undefined;
+  // old reddit annotates .thing with data-author / data-author-fullname
+  if (thing.dataset.author && thing.dataset.authorFullname) {
+    const id = idFromFullname(thing.dataset.authorFullname);
+    if (id !== undefined) idMap.set(thing.dataset.author.toLowerCase(), id);
+    if (thing.dataset.author.toLowerCase() === link.textContent.trim().toLowerCase()) {
+      return id;
+    }
+  }
+  return undefined;
+}
+
 function processNewAuthors() {
   const links = document.querySelectorAll("a.author:not([data-hrb])");
-  const toLookup = new Set();
+  const fresh = [];
   for (const link of links) {
     link.dataset.hrb = "1";
     const name = link.textContent.trim();
@@ -120,35 +255,89 @@ function processNewAuthors() {
       registry.set(lower, set);
     }
     set.add(link);
-    const cached = memCache.get(lower);
-    const expired = cached && cached.c == null && Date.now() - cached.t > NEG_CACHE_MS;
-    if (cached && !expired) {
-      applyToElement(link, cached);
-    } else {
-      applyToElement(link, null); // pending placeholder
-      toLookup.add(lower);
-    }
+    harvestIdFromThing(link);
+    fresh.push(lower);
   }
-  if (toLookup.size) lookupUsers([...toLookup]);
+  if (fresh.length) resolveUsers([...new Set(fresh)]);
 }
 
-// ----- resolution: storage cache, then network -----
-async function lookupUsers(names) {
-  const stored = await browser.storage.local.get(names.map(keyFor));
-  const now = Date.now();
+// ----- resolution -----
+async function resolveUsers(names) {
+  const unknown = names.filter((n) => !memCache.has(n));
+  if (unknown.length) {
+    const stored = await browser.storage.local.get(unknown.map(keyFor));
+    for (const name of unknown) {
+      const entry = stored[keyFor(name)];
+      if (entry) {
+        memCache.set(name, entry);
+        if (entry.id !== undefined && !idMap.has(name)) idMap.set(name, entry.id);
+      }
+    }
+  }
+  // mark last-seen (at most one write per user per day)
+  const day = today();
+  const touch = {};
   for (const name of names) {
-    const entry = stored[keyFor(name)];
-    const expired = entry && entry.c == null && now - entry.t > NEG_CACHE_MS;
-    if (entry && !expired) {
-      memCache.set(name, entry);
-      applyToUser(name);
-    } else {
-      enqueueFetch(name);
+    const entry = memCache.get(name);
+    if (entry && entry.s !== day) {
+      entry.s = day;
+      touch[keyFor(name)] = entry;
+    }
+  }
+  if (Object.keys(touch).length) browser.storage.local.set(touch);
+
+  for (const name of names) renderUser(name);
+
+  // if some authors still lack an id, try the page's own .json once
+  if (!pageJsonTried) {
+    const needIds = names.some(
+      (n) => stateFor(n).kind === "pending" && idMap.get(n) === undefined
+    );
+    if (needIds) {
+      pageJsonTried = true;
+      fetchPageJson();
     }
   }
 }
 
-function enqueueFetch(name) {
+async function fetchPageJson() {
+  if (Date.now() < backoffUntil) return;
+  try {
+    const path = location.pathname.replace(/\/$/, "") || "/"; // root -> "/.json"
+    const resp = await fetch(
+      location.origin + (path === "/" ? "/.json" : path + ".json") + "?limit=500",
+      { credentials: "same-origin" }
+    );
+    if (resp.status === 429) {
+      noteRateLimit(resp);
+      return;
+    }
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const found = [];
+    const walk = (o) => {
+      if (!o || typeof o !== "object") return;
+      if (typeof o.author === "string" && typeof o.author_fullname === "string") {
+        const id = idFromFullname(o.author_fullname);
+        if (id !== undefined) {
+          const lower = o.author.toLowerCase();
+          if (!idMap.has(lower)) {
+            idMap.set(lower, id);
+            found.push(lower);
+          }
+        }
+      }
+      for (const k in o) walk(o[k]);
+    };
+    walk(data);
+    if (found.length) reapplyAll();
+  } catch (e) {
+    /* page json unavailable — slow queue covers it */
+  }
+}
+
+// ----- verify queue (strictly serial, gentle) -----
+function enqueueVerify(name) {
   if (queued.has(name)) return;
   queued.add(name);
   fetchQueue.push(name);
@@ -156,72 +345,128 @@ function enqueueFetch(name) {
 }
 
 function pump() {
-  if (activeFetches >= MAX_CONCURRENT) return;
+  if (fetchBusy) return;
   const wait = backoffUntil - Date.now();
   if (wait > 0) {
-    setTimeout(pump, wait + 50);
+    setTimeout(pump, wait + 100);
     return;
   }
   const name = fetchQueue.shift();
   if (name === undefined) return;
-  activeFetches++;
-  fetchUser(name).finally(() => {
-    activeFetches--;
-    setTimeout(pump, DEQUEUE_DELAY_MS);
+  // skip if estimation now covers it (anchors may have grown since enqueue)
+  const k = stateFor(name).kind;
+  if (k === "verified" || k === "estimated") {
+    queued.delete(name);
+    renderUser(name);
+    pump();
+    return;
+  }
+  fetchBusy = true;
+  verifyUser(name).finally(() => {
+    fetchBusy = false;
+    setTimeout(pump, VERIFY_INTERVAL_MS);
   });
-  if (fetchQueue.length) pump(); // fill remaining slots
 }
 
-async function fetchUser(name) {
-  let entry = { c: null, t: Date.now() }; // default: unknown (negative cache)
+function noteRateLimit(resp) {
+  const retryAfter = parseInt(resp.headers.get("Retry-After"), 10);
+  const waitMs =
+    Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : BACKOFF_MS;
+  backoffUntil = Date.now() + waitMs;
+}
+
+async function verifyUser(name) {
+  let entry = { c: null, t: Date.now(), s: today() }; // default: unknown
+  const knownId = idMap.get(name);
+  if (knownId !== undefined) entry.id = knownId;
   try {
     const resp = await fetch(
       location.origin + "/user/" + encodeURIComponent(name) + "/about.json",
       { credentials: "same-origin" }
     );
     if (resp.status === 429) {
-      // honor Retry-After when Reddit provides it, else back off BACKOFF_MS
-      const retryAfter = parseInt(resp.headers.get("Retry-After"), 10);
-      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
-        ? retryAfter * 1000
-        : BACKOFF_MS;
-      backoffUntil = Date.now() + waitMs;
+      noteRateLimit(resp);
       queued.delete(name);
       if (!retriedOnce.has(name)) {
         retriedOnce.add(name);
-        enqueueFetch(name); // one retry after backoff
+        enqueueVerify(name); // one retry after backoff
         return;
       }
-      // second 429: fall through and negative-cache
     } else if (resp.ok) {
       const d = await resp.json();
       if (d && d.data && typeof d.data.created_utc === "number") {
-        entry = { c: d.data.created_utc, t: Date.now() };
+        entry.c = d.data.created_utc;
+        // about.json carries the account id (base36, no t2_ prefix)
+        if (typeof d.data.id === "string") {
+          const id = parseInt(d.data.id, 36);
+          if (Number.isFinite(id)) {
+            entry.id = id;
+            idMap.set(name, id);
+          }
+        }
+        if (entry.id !== undefined) addAnchor(entry.id, entry.c);
       }
     }
   } catch (e) {
-    // network error -> negative cache (retried after NEG_CACHE_MS)
+    /* network error -> negative entry, retried after NEG_CACHE_MS */
   }
   queued.delete(name);
+  const isNew = !memCache.has(name);
   memCache.set(name, entry);
   browser.storage.local.set({ [keyFor(name)]: entry });
-  applyToUser(name);
+  if (isNew) bumpEntryCount();
+  renderUser(name);
+  if (entry.c != null) reapplyAll(); // new anchor may unlock estimates for others
+}
+
+// ----- cache trim (LRU by last-seen day) -----
+function bumpEntryCount() {
+  entryCount++;
+  browser.storage.local.set({ meta: { count: entryCount } });
+  if (entryCount > TRIM_LIMIT && !trimRunning) runTrim();
+}
+
+async function runTrim() {
+  trimRunning = true;
+  try {
+    const all = await browser.storage.local.get(null);
+    const entries = Object.keys(all)
+      .filter((k) => k.startsWith("age:"))
+      .map((k) => [k, all[k] && all[k].s ? all[k].s : 0]);
+    if (entries.length > TRIM_KEEP) {
+      entries.sort((a, b) => a[1] - b[1]); // oldest-seen first
+      const remove = entries.slice(0, entries.length - TRIM_KEEP).map((e) => e[0]);
+      await browser.storage.local.remove(remove);
+      entryCount = TRIM_KEEP;
+    } else {
+      entryCount = entries.length;
+    }
+    browser.storage.local.set({ meta: { count: entryCount } });
+  } finally {
+    trimRunning = false;
+  }
 }
 
 // ----- settings -----
-async function loadSettings() {
-  const stored = await browser.storage.local.get("settings");
+async function loadState() {
+  const stored = await browser.storage.local.get(["settings", "anchors", "meta"]);
   settings = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
+  if (Array.isArray(stored.anchors)) anchors = stored.anchors;
+  entryCount = stored.meta && stored.meta.count ? stored.meta.count : 0;
 }
 
 browser.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.settings) {
+  if (area !== "local") return;
+  if (changes.settings) {
     settings = { ...DEFAULT_SETTINGS, ...(changes.settings.newValue || {}) };
     reapplyAll();
   }
+  if (changes.anchors && Array.isArray(changes.anchors.newValue)) {
+    anchors = changes.anchors.newValue; // share calibration across tabs
+  }
 });
 
-// ----- observe dynamic content (RES never-ending scroll, expanded comments) -----
+// ----- observe dynamic content -----
 let scanTimer = null;
 const observer = new MutationObserver(() => {
   if (scanTimer) return;
@@ -233,7 +478,7 @@ const observer = new MutationObserver(() => {
 
 // ----- init -----
 (async function init() {
-  await loadSettings();
+  await loadState();
   processNewAuthors();
   observer.observe(document.body, { childList: true, subtree: true });
 })();
