@@ -109,8 +109,48 @@ const style = document.createElement("style");
 style.textContent = `
   .hrb-hidden { display: none !important; }
   .hrb-age { font-size: 0.85em; margin-left: 4px; font-weight: bold; }
+  #hrb-badge { position: fixed; bottom: 12px; right: 12px; z-index: 2147483646;
+    background: #1a1a1b; color: #d7dadc; border: 1px solid #474748;
+    border-radius: 8px; font: 12px/1.3 -apple-system, system-ui, sans-serif;
+    padding: 6px 9px; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,.4);
+    user-select: none; }
+  #hrb-badge.hrb-collapsed { padding: 6px 8px; border-radius: 14px; }
+  #hrb-badge .hrb-badge-dot { display: none; }
+  #hrb-badge.hrb-collapsed .hrb-badge-full { display: none; }
+  #hrb-badge.hrb-collapsed .hrb-badge-dot { display: inline; font-weight: bold; }
 `;
 document.documentElement.appendChild(style);
+
+// ----- stats badge ----------------------------------------------------------
+let badgeEl = null;
+
+function ensureBadge() {
+  if (badgeEl) return badgeEl;
+  badgeEl = document.createElement("div");
+  badgeEl.id = "hrb-badge";
+  const full = document.createElement("span");
+  full.className = "hrb-badge-full";
+  const dot = document.createElement("span");
+  dot.className = "hrb-badge-dot";
+  dot.textContent = "◑";
+  badgeEl.append(full, dot);
+  badgeEl.title =
+    "Hide the Reddit Bots — hidden / seen (cumulative since reset).\n" +
+    "Only verified-young accounts are hidden, so the rate is conservative.\n" +
+    "Click to collapse.";
+  badgeEl.addEventListener("click", () => {
+    statsUi.collapsed = !statsUi.collapsed;
+    browser.storage.local.set({ statsUi });
+    applyBadgeCollapsed();
+  });
+  document.body.appendChild(badgeEl);
+  applyBadgeCollapsed();
+  return badgeEl;
+}
+
+function applyBadgeCollapsed() {
+  if (badgeEl) badgeEl.classList.toggle("hrb-collapsed", !!statsUi.collapsed);
+}
 
 // ----- age math / colors -----
 function ageDays(createdUtcSeconds) {
