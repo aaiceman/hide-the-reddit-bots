@@ -15,6 +15,13 @@ bots, spammers, and ban evaders — this makes them visible or gone.
 - **Fail-visible** — accounts whose age can't be determined (suspended, rate-limited)
   show `[?]` and are never hidden
 - **Live settings** — threshold and toggles apply immediately to open tabs
+- **Hide-rate stats** — a small collapsible badge (bottom-right) shows how many
+  accounts have been hidden versus seen for the current subreddit (or, on the
+  front page / `r/all` / multireddits, the summed totals of the subreddits shown).
+  The options page has a sortable per-subreddit table with copy-as-markdown and a
+  reset button. Counts are cumulative since the last reset and stay on your
+  machine. Because only *verified*-young accounts are hidden (estimated ages never
+  hide), the rate is deliberately conservative.
 - Coexists with Reddit Enhancement Suite (labels also appear on content loaded by
   RES never-ending scroll)
 
