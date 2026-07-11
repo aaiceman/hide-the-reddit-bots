@@ -14,6 +14,29 @@
   <label><input type="checkbox" id="hideYoung"> Hide posts/comments from young accounts</label>
   <label>Hide accounts younger than <input type="number" id="thresholdDays" min="1" max="3650"> days</label>
   <div class="hint">Changes apply immediately to open Reddit tabs. Accounts whose age can't be determined show [?] and are never hidden.</div>
+  <hr style="margin:16px 0; border:none; border-top:1px solid #ccc;">
+  <div id="statsSection">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+      <strong>Hide statistics</strong>
+      <span>
+        <button type="button" id="copyStats">Copy as markdown</button>
+        <button type="button" id="resetStats">Reset all stats</button>
+      </span>
+    </div>
+    <p class="hint" style="margin-top:6px;">Cumulative since the last reset. Only verified-young accounts count as hidden, so rates are conservative.</p>
+    <table id="statsTable" style="width:100%; border-collapse:collapse; font-size:13px; margin-top:8px;">
+      <thead>
+        <tr>
+          <th data-sort="sub" style="text-align:left; cursor:pointer; border-bottom:1px solid #ccc; padding:4px;">Subreddit</th>
+          <th data-sort="seen" style="text-align:right; cursor:pointer; border-bottom:1px solid #ccc; padding:4px;">Seen</th>
+          <th data-sort="hidden" style="text-align:right; cursor:pointer; border-bottom:1px solid #ccc; padding:4px;">Hidden</th>
+          <th data-sort="rate" style="text-align:right; cursor:pointer; border-bottom:1px solid #ccc; padding:4px;">Rate</th>
+        </tr>
+      </thead>
+      <tbody id="statsBody"></tbody>
+    </table>
+    <p class="hint" id="statsEmpty" style="display:none;">No hides recorded yet.</p>
+  </div>
   <script src="options.js"></script>
 </body>
 </html>
