@@ -152,6 +152,43 @@ function applyBadgeCollapsed() {
   if (badgeEl) badgeEl.classList.toggle("hrb-collapsed", !!statsUi.collapsed);
 }
 
+let badgeRepaintTimer = null;
+
+function badgeTotals() {
+  const sub = currentPageSubreddit();
+  let seen = 0, hidden = 0, label;
+  if (sub) {
+    const e = stats[sub] || { seen: 0, hidden: 0 };
+    seen = e.seen; hidden = e.hidden; label = "r/" + sub;
+  } else {
+    for (const s of pageSubs) {
+      const e = stats[s];
+      if (!e) continue;
+      seen += e.seen; hidden += e.hidden;
+    }
+    label = "this page";
+  }
+  return { seen, hidden, label };
+}
+
+function scheduleBadge() {
+  if (badgeRepaintTimer) return;
+  badgeRepaintTimer = setTimeout(() => {
+    badgeRepaintTimer = null;
+    renderBadge();
+  }, 250);
+}
+
+function renderBadge() {
+  const hasContext = currentPageSubreddit() != null || pageSubs.size > 0;
+  if (!hasContext) return;
+  ensureBadge();
+  const { seen, hidden, label } = badgeTotals();
+  const pct = seen > 0 ? Math.round((hidden / seen) * 100) : 0;
+  badgeEl.querySelector(".hrb-badge-full").textContent =
+    `${label} · ${hidden} / ${seen} · ${pct}%`;
+}
+
 // ----- age math / colors -----
 function ageDays(createdUtcSeconds) {
   return Math.floor((Date.now() / 1000 - createdUtcSeconds) / 86400);
@@ -563,10 +600,14 @@ async function runTrim() {
 
 // ----- settings -----
 async function loadState() {
-  const stored = await browser.storage.local.get(["settings", "anchors", "meta"]);
+  const stored = await browser.storage.local.get([
+    "settings", "anchors", "meta", "stats", "statsUi",
+  ]);
   settings = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
   if (Array.isArray(stored.anchors)) anchors = stored.anchors;
   entryCount = stored.meta && stored.meta.count ? stored.meta.count : 0;
+  stats = stored.stats && typeof stored.stats === "object" ? stored.stats : {};
+  statsUi = { collapsed: false, ...(stored.statsUi || {}) };
 }
 
 browser.storage.onChanged.addListener((changes, area) => {
@@ -577,6 +618,16 @@ browser.storage.onChanged.addListener((changes, area) => {
   }
   if (changes.anchors && Array.isArray(changes.anchors.newValue)) {
     anchors = changes.anchors.newValue; // share calibration across tabs
+  }
+  if (changes.stats) {
+    stats = changes.stats.newValue && typeof changes.stats.newValue === "object"
+      ? changes.stats.newValue
+      : {};
+    renderBadge();
+  }
+  if (changes.statsUi) {
+    statsUi = { collapsed: false, ...(changes.statsUi.newValue || {}) };
+    applyBadgeCollapsed();
   }
 });
 
@@ -594,5 +645,7 @@ const observer = new MutationObserver(() => {
 (async function init() {
   await loadState();
   processNewAuthors();
+  renderBadge();
+  window.addEventListener("pagehide", flushStats);
   observer.observe(document.body, { childList: true, subtree: true });
 })();
