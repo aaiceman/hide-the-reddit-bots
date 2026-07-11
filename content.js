@@ -41,6 +41,44 @@ let anchors = [];
 let entryCount = 0;
 let trimRunning = false;
 
+// ----- stats (cumulative hide-rate per subreddit, since last reset) -----
+// stored in storage.local under "stats": { "<subreddit>": { seen, hidden } }
+let stats = {};
+let statsUi = { collapsed: false };
+const pageSubs = new Set(); // distinct subreddits with >=1 processed .thing this page load
+let statsPersistTimer = null;
+
+function bumpSeen(sub) {
+  const e = stats[sub] || (stats[sub] = { seen: 0, hidden: 0 });
+  e.seen++;
+  pageSubs.add(sub);
+  schedulePersistStats();
+  scheduleBadge();
+}
+
+function bumpHidden(sub) {
+  const e = stats[sub] || (stats[sub] = { seen: 0, hidden: 0 });
+  e.hidden++;
+  schedulePersistStats();
+  scheduleBadge();
+}
+
+function schedulePersistStats() {
+  if (statsPersistTimer) return;
+  statsPersistTimer = setTimeout(() => {
+    statsPersistTimer = null;
+    browser.storage.local.set({ stats });
+  }, 1000);
+}
+
+function flushStats() {
+  if (statsPersistTimer) {
+    clearTimeout(statsPersistTimer);
+    statsPersistTimer = null;
+  }
+  browser.storage.local.set({ stats });
+}
+
 const today = () => Math.floor(Date.now() / 86400000);
 const safeOldDays = () => Math.max(SAFE_OLD_BASE_DAYS, settings.thresholdDays * 2);
 
