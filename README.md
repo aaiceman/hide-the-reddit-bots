@@ -42,10 +42,20 @@ Nightly, or ESR with `xpinstall.signatures.required = false`.
 ## How it works
 
 A content script scans `a.author` links, resolves each account's creation date via
-Reddit's public `/user/<name>/about.json` endpoint (same-origin, throttled to 5
-concurrent requests with backoff on rate limits), caches results in
-`browser.storage.local`, and toggles a `display: none` class on the enclosing
-`.thing` element. No background script, no external services, no analytics.
+Reddit's public `/user/<name>/about.json` endpoint (same-origin, serial requests
+with backoff on rate limits), caches results in `browser.storage.local`, and
+toggles a `display: none` class on the enclosing `.thing` element. No background
+script, no external services, no analytics.
+
+**Hiding is dynamic, not refresh-based.** While a username is being looked up, it
+shows a `[…]` placeholder. The moment the lookup completes, every occurrence of
+that user on the page gets its age label and — if the account is under the
+threshold — its post/comment is hidden in the same instant. This means an
+uncached young account's content can appear briefly and then vanish once its age
+resolves. Cached usernames (anyone you've encountered before) are labeled and
+hidden immediately on page load, with no flash. Settings changes work the same
+way: toggling hiding or changing the threshold re-applies to all open tabs
+instantly, unhiding or hiding content without a reload.
 
 ## Credits
 
