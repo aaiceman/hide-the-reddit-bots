@@ -79,6 +79,28 @@ function flushStats() {
   browser.storage.local.set({ stats });
 }
 
+// subreddit context ----------------------------------------------------------
+const MIXED_SUBS = new Set(["all", "popular", "mod", "friends"]);
+
+// The single subreddit this page is scoped to, or null for mixed listings
+// (front page, /r/all, /r/popular, multireddits, user profiles, search, etc.).
+function currentPageSubreddit() {
+  const m = location.pathname.match(/^\/r\/([A-Za-z0-9_]+)(?:\/|$)/);
+  if (!m) return null;
+  const name = m[1].toLowerCase();
+  return MIXED_SUBS.has(name) ? null : name;
+}
+
+// Subreddit for a specific .thing (post/comment), lowercased, or null.
+// Old Reddit annotates .thing with data-subreddit (same family as the
+// data-author attributes this extension already relies on).
+function subredditOfThing(thing) {
+  if (thing && thing.dataset && thing.dataset.subreddit) {
+    return thing.dataset.subreddit.toLowerCase();
+  }
+  return currentPageSubreddit();
+}
+
 const today = () => Math.floor(Date.now() / 86400000);
 const safeOldDays = () => Math.max(SAFE_OLD_BASE_DAYS, settings.thresholdDays * 2);
 
