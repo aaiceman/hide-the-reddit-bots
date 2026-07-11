@@ -41,6 +41,66 @@ let anchors = [];
 let entryCount = 0;
 let trimRunning = false;
 
+// ----- stats (cumulative hide-rate per subreddit, since last reset) -----
+// stored in storage.local under "stats": { "<subreddit>": { seen, hidden } }
+let stats = {};
+let statsUi = { collapsed: false };
+const pageSubs = new Set(); // distinct subreddits with >=1 processed .thing this page load
+let statsPersistTimer = null;
+
+function bumpSeen(sub) {
+  const e = stats[sub] || (stats[sub] = { seen: 0, hidden: 0 });
+  e.seen++;
+  pageSubs.add(sub);
+  schedulePersistStats();
+  scheduleBadge();
+}
+
+function bumpHidden(sub) {
+  const e = stats[sub] || (stats[sub] = { seen: 0, hidden: 0 });
+  e.hidden++;
+  schedulePersistStats();
+  scheduleBadge();
+}
+
+function schedulePersistStats() {
+  if (statsPersistTimer) return;
+  statsPersistTimer = setTimeout(() => {
+    statsPersistTimer = null;
+    browser.storage.local.set({ stats });
+  }, 1000);
+}
+
+function flushStats() {
+  if (statsPersistTimer) {
+    clearTimeout(statsPersistTimer);
+    statsPersistTimer = null;
+  }
+  browser.storage.local.set({ stats });
+}
+
+// subreddit context ----------------------------------------------------------
+const MIXED_SUBS = new Set(["all", "popular", "mod", "friends"]);
+
+// The single subreddit this page is scoped to, or null for mixed listings
+// (front page, /r/all, /r/popular, multireddits, user profiles, search, etc.).
+function currentPageSubreddit() {
+  const m = location.pathname.match(/^\/r\/([A-Za-z0-9_]+)(?:\/|$)/);
+  if (!m) return null;
+  const name = m[1].toLowerCase();
+  return MIXED_SUBS.has(name) ? null : name;
+}
+
+// Subreddit for a specific .thing (post/comment), lowercased, or null.
+// Old Reddit annotates .thing with data-subreddit (same family as the
+// data-author attributes this extension already relies on).
+function subredditOfThing(thing) {
+  if (thing && thing.dataset && thing.dataset.subreddit) {
+    return thing.dataset.subreddit.toLowerCase();
+  }
+  return currentPageSubreddit();
+}
+
 const today = () => Math.floor(Date.now() / 86400000);
 const safeOldDays = () => Math.max(SAFE_OLD_BASE_DAYS, settings.thresholdDays * 2);
 
@@ -49,8 +109,85 @@ const style = document.createElement("style");
 style.textContent = `
   .hrb-hidden { display: none !important; }
   .hrb-age { font-size: 0.85em; margin-left: 4px; font-weight: bold; }
+  #hrb-badge { position: fixed; bottom: 12px; right: 12px; z-index: 2147483646;
+    background: #1a1a1b; color: #d7dadc; border: 1px solid #474748;
+    border-radius: 8px; font: 12px/1.3 -apple-system, system-ui, sans-serif;
+    padding: 6px 9px; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,.4);
+    user-select: none; }
+  #hrb-badge.hrb-collapsed { padding: 6px 8px; border-radius: 14px; }
+  #hrb-badge .hrb-badge-dot { display: none; }
+  #hrb-badge.hrb-collapsed .hrb-badge-full { display: none; }
+  #hrb-badge.hrb-collapsed .hrb-badge-dot { display: inline; font-weight: bold; }
 `;
 document.documentElement.appendChild(style);
+
+// ----- stats badge ----------------------------------------------------------
+let badgeEl = null;
+
+function ensureBadge() {
+  if (badgeEl) return badgeEl;
+  badgeEl = document.createElement("div");
+  badgeEl.id = "hrb-badge";
+  const full = document.createElement("span");
+  full.className = "hrb-badge-full";
+  const dot = document.createElement("span");
+  dot.className = "hrb-badge-dot";
+  dot.textContent = "◑";
+  badgeEl.append(full, dot);
+  badgeEl.title =
+    "Hide the Reddit Bots — hidden / seen (cumulative since reset).\n" +
+    "Only verified-young accounts are hidden, so the rate is conservative.\n" +
+    "Click to collapse.";
+  badgeEl.addEventListener("click", () => {
+    statsUi.collapsed = !statsUi.collapsed;
+    browser.storage.local.set({ statsUi });
+    applyBadgeCollapsed();
+  });
+  document.body.appendChild(badgeEl);
+  applyBadgeCollapsed();
+  return badgeEl;
+}
+
+function applyBadgeCollapsed() {
+  if (badgeEl) badgeEl.classList.toggle("hrb-collapsed", !!statsUi.collapsed);
+}
+
+let badgeRepaintTimer = null;
+
+function badgeTotals() {
+  const sub = currentPageSubreddit();
+  let seen = 0, hidden = 0, label;
+  if (sub) {
+    const e = stats[sub] || { seen: 0, hidden: 0 };
+    seen = e.seen; hidden = e.hidden; label = "r/" + sub;
+  } else {
+    for (const s of pageSubs) {
+      const e = stats[s];
+      if (!e) continue;
+      seen += e.seen; hidden += e.hidden;
+    }
+    label = "this page";
+  }
+  return { seen, hidden, label };
+}
+
+function scheduleBadge() {
+  if (badgeRepaintTimer) return;
+  badgeRepaintTimer = setTimeout(() => {
+    badgeRepaintTimer = null;
+    renderBadge();
+  }, 250);
+}
+
+function renderBadge() {
+  const hasContext = currentPageSubreddit() != null || pageSubs.size > 0;
+  if (!hasContext) return;
+  ensureBadge();
+  const { seen, hidden, label } = badgeTotals();
+  const pct = seen > 0 ? Math.round((hidden / seen) * 100) : 0;
+  badgeEl.querySelector(".hrb-badge-full").textContent =
+    `${label} · ${hidden} / ${seen} · ${pct}%`;
+}
 
 // ----- age math / colors -----
 function ageDays(createdUtcSeconds) {
@@ -157,8 +294,16 @@ function ensureSpan(link) {
 function setHidden(link, hidden) {
   const container = link.closest(".thing");
   if (!container) return;
-  if (hidden) container.classList.add("hrb-hidden");
-  else container.classList.remove("hrb-hidden");
+  if (hidden) {
+    container.classList.add("hrb-hidden");
+    if (!container.dataset.hrbHiddenCounted) {
+      container.dataset.hrbHiddenCounted = "1";
+      const sub = subredditOfThing(container);
+      if (sub) bumpHidden(sub);
+    }
+  } else {
+    container.classList.remove("hrb-hidden");
+  }
 }
 
 // state: {kind: "pending"|"unknown"|"verified"|"estimated", days?, floor?}
@@ -256,6 +401,12 @@ function processNewAuthors() {
     }
     set.add(link);
     harvestIdFromThing(link);
+    const thing = link.closest(".thing");
+    if (thing && !thing.dataset.hrbSeen) {
+      thing.dataset.hrbSeen = "1";
+      const sub = subredditOfThing(thing);
+      if (sub) bumpSeen(sub);
+    }
     fresh.push(lower);
   }
   if (fresh.length) resolveUsers([...new Set(fresh)]);
@@ -449,10 +600,14 @@ async function runTrim() {
 
 // ----- settings -----
 async function loadState() {
-  const stored = await browser.storage.local.get(["settings", "anchors", "meta"]);
+  const stored = await browser.storage.local.get([
+    "settings", "anchors", "meta", "stats", "statsUi",
+  ]);
   settings = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
   if (Array.isArray(stored.anchors)) anchors = stored.anchors;
   entryCount = stored.meta && stored.meta.count ? stored.meta.count : 0;
+  stats = stored.stats && typeof stored.stats === "object" ? stored.stats : {};
+  statsUi = { collapsed: false, ...(stored.statsUi || {}) };
 }
 
 browser.storage.onChanged.addListener((changes, area) => {
@@ -463,6 +618,16 @@ browser.storage.onChanged.addListener((changes, area) => {
   }
   if (changes.anchors && Array.isArray(changes.anchors.newValue)) {
     anchors = changes.anchors.newValue; // share calibration across tabs
+  }
+  if (changes.stats) {
+    stats = changes.stats.newValue && typeof changes.stats.newValue === "object"
+      ? changes.stats.newValue
+      : {};
+    renderBadge();
+  }
+  if (changes.statsUi) {
+    statsUi = { collapsed: false, ...(changes.statsUi.newValue || {}) };
+    applyBadgeCollapsed();
   }
 });
 
@@ -480,5 +645,7 @@ const observer = new MutationObserver(() => {
 (async function init() {
   await loadState();
   processNewAuthors();
+  renderBadge();
+  window.addEventListener("pagehide", flushStats);
   observer.observe(document.body, { childList: true, subtree: true });
 })();

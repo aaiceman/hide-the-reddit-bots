@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Hide the Reddit Bots",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Shows account ages next to Reddit usernames and hides posts/comments from accounts younger than a configurable threshold. Old Reddit layout only.",
   "browser_specific_settings": {
     "gecko": {
