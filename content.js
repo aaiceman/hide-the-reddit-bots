@@ -833,6 +833,64 @@ const oldRedditUI = {
   },
 };
 
+// shreddit (new Reddit React UI) — DOM facts verified by user console probes
+// 2026-07-14: shreddit-post carries author + author-id (t2) + subreddit-name;
+// shreddit-comment carries author only (light-DOM slotted content).
+function scanShreddit() {
+  const els = document.querySelectorAll(
+    "shreddit-post:not([data-hrb]), shreddit-comment:not([data-hrb])"
+  );
+  const fresh = [];
+  for (const el of els) {
+    el.dataset.hrb = "1";
+    const name = el.getAttribute("author");
+    if (!name || name === "[deleted]") continue;
+    // ad/promoted guard: organic posts carry author-id; ad units do not
+    if (el.tagName === "SHREDDIT-POST" && !el.getAttribute("author-id")) continue;
+    const lower = name.toLowerCase();
+    const id = idFromFullname(el.getAttribute("author-id") || "");
+    if (id !== undefined && !idMap.has(lower)) idMap.set(lower, id);
+    // label target: the author link in the element's light DOM, else the host
+    let target = null;
+    const prefix = "/user/" + lower;
+    for (const a of el.querySelectorAll('a[href^="/user/"]')) {
+      if ((a.getAttribute("href") || "").toLowerCase().startsWith(prefix)) {
+        target = a;
+        break;
+      }
+    }
+    if (!target) target = el;
+    let set = registry.get(lower);
+    if (!set) {
+      set = new Set();
+      registry.set(lower, set);
+    }
+    set.add(target);
+    harvestCommentBody(target, lower);
+    if (!el.dataset.hrbSeen) {
+      el.dataset.hrbSeen = "1";
+      const sub = UI.subredditOf(el);
+      if (sub) bumpSeen(sub);
+    }
+    fresh.push(lower);
+  }
+  if (fresh.length) resolveUsers([...new Set(fresh)]);
+}
+
+const shredditUI = {
+  hostSelector: "shreddit-post, shreddit-comment",
+  scan: scanShreddit,
+  subredditOf(host) {
+    const sub = host.getAttribute && host.getAttribute("subreddit-name");
+    return sub ? sub.toLowerCase() : currentPageSubreddit();
+  },
+  commentBodyOf(host) {
+    if (host.tagName !== "SHREDDIT-COMMENT") return null;
+    const slot = host.querySelector('[slot="comment"]');
+    return slot ? slot.textContent : null;
+  },
+};
+
 // ----- observe dynamic content -----
 let scanTimer = null;
 const observer = new MutationObserver(() => {
@@ -845,7 +903,7 @@ const observer = new MutationObserver(() => {
 
 // ----- init -----
 (async function init() {
-  UI = oldRedditUI; // v1.4.0 Task 2 adds shreddit detection here
+  UI = document.querySelector("shreddit-app") ? shredditUI : oldRedditUI;
   await loadState();
   UI.scan();
   renderBadge();
