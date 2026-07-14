@@ -13,7 +13,35 @@
 //      accounts. Every verification adds an anchor, so demand collapses as
 //      calibration builds.
 
-const DEFAULT_SETTINGS = { thresholdDays: 30, showAges: true, hideYoung: true };
+const DEFAULT_SETTINGS = {
+  thresholdDays: 30,
+  showAges: true,
+  suspectedThreshold: 4,
+  almostCertainThreshold: 7,
+  hideSuspected: false,
+  hideAlmostCertain: true,
+  factors: {
+    age: true,
+    karmaAge: true,
+    karmaShape: true,
+    namePattern: true,
+    dupeComment: true,
+    noEmail: true,
+    defaultAvatar: true,
+    emptyProfile: true,
+  },
+};
+
+// Deep-merge stored settings over defaults; migrate v1.x hideYoung.
+function mergeSettings(stored) {
+  const s = { ...DEFAULT_SETTINGS, ...(stored || {}) };
+  s.factors = { ...DEFAULT_SETTINGS.factors, ...((stored && stored.factors) || {}) };
+  if (stored && stored.hideYoung === false && !(stored.factors && "age" in stored.factors)) {
+    s.factors.age = false; // user had disabled young-account hiding
+  }
+  delete s.hideYoung;
+  return s;
+}
 const NEG_CACHE_MS = 60 * 60 * 1000; // retry failed lookups after 1 hour
 const VERIFY_INTERVAL_MS = 7000; // ~8.5 requests/minute, strictly serial
 const BACKOFF_MS = 5 * 60 * 1000; // after a 429 without Retry-After
@@ -429,9 +457,19 @@ function renderElement(link, state) {
     span.textContent = settings.showAges ? `[${ageText(state.days)}]` : "";
     span.style.color = ageColor(state.days);
   }
-  // only VERIFIED ages may hide
-  const young = state.kind === "verified" && state.days < settings.thresholdDays;
-  setHidden(link, young && settings.hideYoung);
+  // v1.3.0: bot-score markers + tier-based hiding (replaces hideYoung hard rule)
+  const bot = state.bot || { tier: null, score: 0, evidence: [] };
+  if (bot.tier) {
+    const glyph = bot.tier === "almost" ? "\u{1F916}" : "⚠";
+    span.textContent += (span.textContent ? " " : "") + glyph;
+    span.title = `${bot.score} pts: ${bot.evidence.join(" · ")}`;
+  } else {
+    span.title = "";
+  }
+  const hidden =
+    (bot.tier === "almost" && settings.hideAlmostCertain) ||
+    (bot.tier === "suspected" && settings.hideSuspected);
+  setHidden(link, hidden);
 }
 
 function stateFor(name) {
@@ -450,6 +488,17 @@ function renderUser(name) {
   const set = registry.get(name);
   if (!set) return;
   const state = stateFor(name);
+  let displayName = name;
+  for (const l of set) {
+    if (l.isConnected) {
+      displayName = l.textContent.trim();
+      break;
+    }
+  }
+  state.bot = computeBotScore(memCache.get(name), {
+    namePattern: NAME_PATTERN_RE.test(displayName),
+    dupe: dupeUsers.has(name),
+  });
   for (const link of set) {
     if (!link.isConnected) {
       set.delete(link);
@@ -716,7 +765,7 @@ async function loadState() {
   const stored = await browser.storage.local.get([
     "settings", "anchors", "meta", "stats", "statsUi",
   ]);
-  settings = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
+  settings = mergeSettings(stored.settings);
   if (Array.isArray(stored.anchors)) anchors = stored.anchors;
   entryCount = stored.meta && stored.meta.count ? stored.meta.count : 0;
   stats = stored.stats && typeof stored.stats === "object" ? stored.stats : {};
@@ -726,7 +775,7 @@ async function loadState() {
 browser.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.settings) {
-    settings = { ...DEFAULT_SETTINGS, ...(changes.settings.newValue || {}) };
+    settings = mergeSettings(changes.settings.newValue);
     reapplyAll();
   }
   if (changes.anchors && Array.isArray(changes.anchors.newValue)) {
