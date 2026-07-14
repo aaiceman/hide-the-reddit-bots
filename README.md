@@ -36,8 +36,10 @@ bots, spammers, and ban evaders — this makes them visible or gone.
 
 ## Scope
 
-Old Reddit layout only (`old.reddit.com` and legacy-mode `www.reddit.com`). The
-modern React UI is not supported.
+Works on both layouts: old Reddit (`old.reddit.com` / legacy `www.reddit.com`)
+and the modern React UI (`www.reddit.com`). On the React UI, post author IDs
+come straight from the page, so age estimation warms up even faster; promoted
+posts (ads) are ignored entirely.
 
 ## Settings
 

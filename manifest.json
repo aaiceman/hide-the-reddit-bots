@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Hide the Reddit Bots",
-  "version": "1.3.1",
-  "description": "Shows account ages next to Reddit usernames and hides posts/comments from accounts younger than a configurable threshold. Old Reddit layout only.",
+  "version": "1.4.0",
+  "description": "Shows account ages next to Reddit usernames and hides posts/comments from accounts younger than a configurable threshold. Works on old Reddit and the modern React UI.",
   "browser_specific_settings": {
     "gecko": {
       "id": "hide-the-reddit-bots@aaiceman.addons",
