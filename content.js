@@ -178,6 +178,8 @@ style.textContent = `
     user-select: none; }
   #hrb-badge.hrb-collapsed { padding: 6px 8px; border-radius: 14px; }
   #hrb-badge .hrb-badge-dot { display: none; }
+  #hrb-badge .hrb-badge-gear { margin-left: 7px; color: #9ac2ff; text-decoration: none; }
+  #hrb-badge.hrb-collapsed .hrb-badge-gear { display: none; }
   #hrb-badge.hrb-collapsed .hrb-badge-full { display: none; }
   #hrb-badge.hrb-collapsed .hrb-badge-dot { display: inline; font-weight: bold; }
 `;
@@ -195,7 +197,15 @@ function ensureBadge() {
   const dot = document.createElement("span");
   dot.className = "hrb-badge-dot";
   dot.textContent = "◑";
-  badgeEl.append(full, dot);
+  const gear = document.createElement("a");
+  gear.className = "hrb-badge-gear";
+  gear.textContent = "⚙";
+  gear.href = browser.runtime.getURL("options.html");
+  gear.target = "_blank";
+  gear.rel = "noopener";
+  gear.title = "Hide the Reddit Bots — options";
+  gear.addEventListener("click", (e) => e.stopPropagation());
+  badgeEl.append(full, dot, gear);
   badgeEl.title =
     "Hide the Reddit Bots — hidden / seen (cumulative since reset).\n" +
     "Only verified-young accounts are hidden, so the rate is conservative.\n" +
