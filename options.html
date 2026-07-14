@@ -11,8 +11,37 @@
 </head>
 <body>
   <label><input type="checkbox" id="showAges"> Show account-age labels next to usernames</label>
-  <label><input type="checkbox" id="hideYoung"> Hide posts/comments from young accounts</label>
   <label>Hide accounts younger than <input type="number" id="thresholdDays" min="1" max="3650"> days</label>
+  <hr style="margin:16px 0; border:none; border-top:1px solid #ccc;">
+  <div id="botSection">
+    <strong>Bot score</strong>
+    <p class="hint" style="margin-top:6px;">Accounts earn points per factor below. At least one strong factor (3+ pts) is required before any flag — weak signals alone never flag. Suspected bots get a &#9888; marker; almost-certain bots get &#129302;.</p>
+    <label><input type="checkbox" id="hideAlmostCertain"> Hide almost-certain bots at
+      <input type="range" id="almostCertainThreshold" min="1" max="15" step="1" style="width:120px; vertical-align:middle;">
+      <span id="acVal"></span> pts</label>
+    <label><input type="checkbox" id="hideSuspected"> Hide suspected bots at
+      <input type="range" id="suspectedThreshold" min="1" max="15" step="1" style="width:120px; vertical-align:middle;">
+      <span id="susVal"></span> pts</label>
+    <table id="factorTable" style="width:100%; border-collapse:collapse; font-size:13px; margin-top:8px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; border-bottom:1px solid #ccc; padding:4px;">Factor</th>
+          <th style="text-align:right; border-bottom:1px solid #ccc; padding:4px;">Pts</th>
+          <th style="text-align:left; border-bottom:1px solid #ccc; padding:4px;">Fires when</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td style="padding:4px;"><label><input type="checkbox" id="f_age" class="factor"> Young account</label></td><td style="text-align:right; padding:4px;">7</td><td style="padding:4px;" class="hint">verified age under the threshold above</td></tr>
+        <tr><td style="padding:4px;"><label><input type="checkbox" id="f_karmaAge" class="factor"> Karma-to-age</label></td><td style="text-align:right; padding:4px;">3&ndash;5</td><td style="padding:4px;" class="hint">&ge;200/day (3) or &ge;1000/day (5), account under 2 years</td></tr>
+        <tr><td style="padding:4px;"><label><input type="checkbox" id="f_karmaShape" class="factor"> Link-farm karma</label></td><td style="text-align:right; padding:4px;">3</td><td style="padding:4px;" class="hint">link karma &gt;10&times; comment karma, &gt;10k total</td></tr>
+        <tr><td style="padding:4px;"><label><input type="checkbox" id="f_namePattern" class="factor"> Suggested username</label></td><td style="text-align:right; padding:4px;">2</td><td style="padding:4px;" class="hint">Word_Word_1234 pattern</td></tr>
+        <tr><td style="padding:4px;"><label><input type="checkbox" id="f_dupeComment" class="factor"> Duplicate comment</label></td><td style="text-align:right; padding:4px;">2</td><td style="padding:4px;" class="hint">identical comment elsewhere on the page</td></tr>
+        <tr><td style="padding:4px;"><label><input type="checkbox" id="f_noEmail" class="factor"> No verified email</label></td><td style="text-align:right; padding:4px;">1</td><td style="padding:4px;" class="hint">weak signal</td></tr>
+        <tr><td style="padding:4px;"><label><input type="checkbox" id="f_defaultAvatar" class="factor"> Default avatar</label></td><td style="text-align:right; padding:4px;">1</td><td style="padding:4px;" class="hint">weak signal</td></tr>
+        <tr><td style="padding:4px;"><label><input type="checkbox" id="f_emptyProfile" class="factor"> Empty profile</label></td><td style="text-align:right; padding:4px;">1</td><td style="padding:4px;" class="hint">weak signal</td></tr>
+      </tbody>
+    </table>
+  </div>
   <div class="hint">Changes apply immediately to open Reddit tabs. Accounts whose age can't be determined show [?] and are never hidden.</div>
   <hr style="margin:16px 0; border:none; border-top:1px solid #ccc;">
   <div id="statsSection">
