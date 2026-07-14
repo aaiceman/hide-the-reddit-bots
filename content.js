@@ -189,6 +189,74 @@ function renderBadge() {
     `${label} · ${hidden} / ${seen} · ${pct}%`;
 }
 
+// ----- bot score (v1.3.0) ----------------------------------------------------
+// Suggested-username shape: Word_Word_1234 / Word-Word-1234 (optional 2nd sep)
+const NAME_PATTERN_RE = /^[A-Z][a-z]+[_-][A-Z][a-z]+[_-]?\d{1,6}$/;
+
+const FACTOR_POINTS = {
+  age: 7,
+  karmaAgeExtreme: 5,
+  karmaAgeHigh: 3,
+  karmaShape: 3,
+  namePattern: 2,
+  dupeComment: 2,
+  noEmail: 1,
+  defaultAvatar: 1,
+  emptyProfile: 1,
+};
+
+// entry: cache entry ({c, sig}) or undefined; live: {namePattern, dupe} or null.
+// Returns {score, tier, evidence[]}; tier: null | "suspected" | "almost".
+// GATE: a tier requires at least one Strong factor (age / karmaAge / karmaShape).
+function computeBotScore(entry, live) {
+  const f = settings.factors;
+  let score = 0;
+  let strong = false;
+  const evidence = [];
+  const add = (pts, label, isStrong) => {
+    score += pts;
+    if (isStrong) strong = true;
+    evidence.push(`${label} (${pts})`);
+  };
+  const days = entry && entry.c != null ? ageDays(entry.c) : null;
+  if (days != null) {
+    if (f.age && days < settings.thresholdDays) {
+      add(FACTOR_POINTS.age, `account ${days}d old`, true);
+    }
+    const sig = entry.sig;
+    if (sig) {
+      if (f.karmaAge && days < 730) {
+        const perDay = days > 0 ? sig.tk / days : sig.tk;
+        if (perDay >= 1000) {
+          add(FACTOR_POINTS.karmaAgeExtreme, `${Math.round(perDay)} karma/day`, true);
+        } else if (perDay >= 200) {
+          add(FACTOR_POINTS.karmaAgeHigh, `${Math.round(perDay)} karma/day`, true);
+        }
+      }
+      if (f.karmaShape && sig.tk > 10000 && sig.lk > 10 * sig.ck) {
+        add(FACTOR_POINTS.karmaShape, "link-heavy karma", true);
+      }
+      if (f.noEmail && !sig.ve) add(FACTOR_POINTS.noEmail, "no verified email", false);
+      if (f.defaultAvatar && sig.di) add(FACTOR_POINTS.defaultAvatar, "default avatar", false);
+      if (f.emptyProfile && sig.ep) add(FACTOR_POINTS.emptyProfile, "empty profile", false);
+    }
+  }
+  if (live) {
+    if (f.namePattern && live.namePattern) {
+      add(FACTOR_POINTS.namePattern, "suggested username", false);
+    }
+    if (f.dupeComment && live.dupe) {
+      add(FACTOR_POINTS.dupeComment, "duplicate comment", false);
+    }
+  }
+  let tier = null;
+  if (strong) {
+    if (score >= settings.almostCertainThreshold) tier = "almost";
+    else if (score >= settings.suspectedThreshold) tier = "suspected";
+  }
+  return { score, tier, evidence };
+}
+
 // ----- age math / colors -----
 function ageDays(createdUtcSeconds) {
   return Math.floor((Date.now() / 1000 - createdUtcSeconds) / 86400);
