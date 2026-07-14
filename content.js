@@ -138,13 +138,13 @@ function normalizeBody(text) {
   return text.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-function harvestCommentBody(link, lowerName) {
-  const thing = link.closest(".thing");
-  if (!thing || !thing.classList.contains("comment") || thing.dataset.hrbDupe) return;
-  thing.dataset.hrbDupe = "1";
-  const md = thing.querySelector(".usertext-body .md");
-  if (!md) return;
-  const body = normalizeBody(md.textContent || "");
+function harvestCommentBody(target, lowerName) {
+  const host = target.closest(UI.hostSelector);
+  if (!host || host.dataset.hrbDupe) return;
+  host.dataset.hrbDupe = "1";
+  const raw = UI.commentBodyOf(host);
+  if (!raw) return;
+  const body = normalizeBody(raw);
   if (body.length < 40) return;
   let rec = dupeBodies.get(body);
   if (!rec) {
@@ -171,6 +171,7 @@ const style = document.createElement("style");
 style.textContent = `
   .hrb-hidden { display: none !important; }
   .hrb-age { font-size: 0.85em; margin-left: 4px; font-weight: bold; }
+  .hrb-age-chip { display: block; margin: 0; padding: 2px 8px 0; }
   #hrb-badge { position: fixed; bottom: 12px; right: 12px; z-index: 2147483646;
     background: #1a1a1b; color: #d7dadc; border: 1px solid #474748;
     border-radius: 8px; font: 12px/1.3 -apple-system, system-ui, sans-serif;
@@ -421,24 +422,34 @@ function estimateOld(id) {
 }
 
 // ----- rendering -----
-function ensureSpan(link) {
-  let span = link.nextElementSibling;
-  if (!(span && span.classList && span.classList.contains("hrb-age"))) {
+function ensureSpan(target) {
+  if (target.tagName === "A") {
+    let span = target.nextElementSibling;
+    if (!(span && span.classList && span.classList.contains("hrb-age"))) {
+      span = document.createElement("span");
+      span.className = "hrb-age";
+      target.after(span);
+    }
+    return span;
+  }
+  // host-element fallback (shreddit card without a light-DOM author link)
+  let span = target.querySelector(":scope > .hrb-age");
+  if (!span) {
     span = document.createElement("span");
-    span.className = "hrb-age";
-    link.after(span);
+    span.className = "hrb-age hrb-age-chip";
+    target.prepend(span);
   }
   return span;
 }
 
 function setHidden(link, hidden) {
-  const container = link.closest(".thing");
+  const container = link.closest(UI.hostSelector);
   if (!container) return;
   if (hidden) {
     container.classList.add("hrb-hidden");
     if (!container.dataset.hrbHiddenCounted) {
       container.dataset.hrbHiddenCounted = "1";
-      const sub = subredditOfThing(container);
+      const sub = UI.subredditOf(container);
       if (sub) bumpHidden(sub);
     }
   } else {
@@ -501,7 +512,11 @@ function renderUser(name) {
   let displayName = name;
   for (const l of set) {
     if (l.isConnected) {
-      displayName = l.textContent.trim();
+      const host = l.closest(UI.hostSelector);
+      displayName =
+        (host && (host.dataset.author || host.getAttribute("author"))) ||
+        l.textContent.trim() ||
+        name;
       break;
     }
   }
@@ -803,20 +818,36 @@ browser.storage.onChanged.addListener((changes, area) => {
   }
 });
 
+// ----- UI adapters (v1.4.0) ---------------------------------------------------
+// Everything DOM-specific lives behind this object; the engine is shared.
+let UI = null;
+
+const oldRedditUI = {
+  hostSelector: ".thing",
+  scan: processNewAuthors,
+  subredditOf: subredditOfThing,
+  commentBodyOf(host) {
+    if (!host.classList.contains("comment")) return null;
+    const md = host.querySelector(".usertext-body .md");
+    return md ? md.textContent : null;
+  },
+};
+
 // ----- observe dynamic content -----
 let scanTimer = null;
 const observer = new MutationObserver(() => {
   if (scanTimer) return;
   scanTimer = setTimeout(() => {
     scanTimer = null;
-    processNewAuthors();
+    UI.scan();
   }, 250);
 });
 
 // ----- init -----
 (async function init() {
+  UI = oldRedditUI; // v1.4.0 Task 2 adds shreddit detection here
   await loadState();
-  processNewAuthors();
+  UI.scan();
   renderBadge();
   window.addEventListener("pagehide", flushStats);
   observer.observe(document.body, { childList: true, subtree: true });
