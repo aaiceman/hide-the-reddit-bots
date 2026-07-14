@@ -1,31 +1,93 @@
 "use strict";
 
-const DEFAULT_SETTINGS = { thresholdDays: 30, showAges: true, hideYoung: true };
+const DEFAULT_SETTINGS = {
+  thresholdDays: 30,
+  showAges: true,
+  suspectedThreshold: 4,
+  almostCertainThreshold: 7,
+  hideSuspected: false,
+  hideAlmostCertain: true,
+  factors: {
+    age: true,
+    karmaAge: true,
+    karmaShape: true,
+    namePattern: true,
+    dupeComment: true,
+    noEmail: true,
+    defaultAvatar: true,
+    emptyProfile: true,
+  },
+};
+
+const FACTOR_IDS = [
+  "age", "karmaAge", "karmaShape", "namePattern",
+  "dupeComment", "noEmail", "defaultAvatar", "emptyProfile",
+];
+
+// Deep-merge stored settings over defaults; migrate v1.x hideYoung. (Mirrors content.js.)
+function mergeSettings(stored) {
+  const s = { ...DEFAULT_SETTINGS, ...(stored || {}) };
+  s.factors = { ...DEFAULT_SETTINGS.factors, ...((stored && stored.factors) || {}) };
+  if (stored && stored.hideYoung === false && !(stored.factors && "age" in stored.factors)) {
+    s.factors.age = false;
+  }
+  delete s.hideYoung;
+  return s;
+}
 
 const els = {
   thresholdDays: document.getElementById("thresholdDays"),
   showAges: document.getElementById("showAges"),
-  hideYoung: document.getElementById("hideYoung"),
+  hideSuspected: document.getElementById("hideSuspected"),
+  hideAlmostCertain: document.getElementById("hideAlmostCertain"),
+  suspectedThreshold: document.getElementById("suspectedThreshold"),
+  almostCertainThreshold: document.getElementById("almostCertainThreshold"),
 };
+
+function updateSliderLabels() {
+  document.getElementById("susVal").textContent = els.suspectedThreshold.value;
+  document.getElementById("acVal").textContent = els.almostCertainThreshold.value;
+}
 
 async function load() {
   const stored = await browser.storage.local.get("settings");
-  const s = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
+  const s = mergeSettings(stored.settings);
   els.thresholdDays.value = s.thresholdDays;
   els.showAges.checked = s.showAges;
-  els.hideYoung.checked = s.hideYoung;
+  els.hideSuspected.checked = s.hideSuspected;
+  els.hideAlmostCertain.checked = s.hideAlmostCertain;
+  els.suspectedThreshold.value = s.suspectedThreshold;
+  els.almostCertainThreshold.value = s.almostCertainThreshold;
+  for (const id of FACTOR_IDS) {
+    document.getElementById("f_" + id).checked = s.factors[id];
+  }
+  updateSliderLabels();
 }
 
 async function save() {
+  const factors = {};
+  for (const id of FACTOR_IDS) {
+    factors[id] = document.getElementById("f_" + id).checked;
+  }
   const s = {
     thresholdDays: Math.max(1, parseInt(els.thresholdDays.value, 10) || DEFAULT_SETTINGS.thresholdDays),
     showAges: els.showAges.checked,
-    hideYoung: els.hideYoung.checked,
+    hideSuspected: els.hideSuspected.checked,
+    hideAlmostCertain: els.hideAlmostCertain.checked,
+    suspectedThreshold: parseInt(els.suspectedThreshold.value, 10) || DEFAULT_SETTINGS.suspectedThreshold,
+    almostCertainThreshold: parseInt(els.almostCertainThreshold.value, 10) || DEFAULT_SETTINGS.almostCertainThreshold,
+    factors,
   };
   await browser.storage.local.set({ settings: s });
 }
 
 for (const el of Object.values(els)) el.addEventListener("change", save);
+for (const id of FACTOR_IDS) {
+  document.getElementById("f_" + id).addEventListener("change", save);
+}
+for (const slider of [els.suspectedThreshold, els.almostCertainThreshold]) {
+  slider.addEventListener("input", updateSliderLabels);
+}
 load();
 
 // ----- stats ----------------------------------------------------------------

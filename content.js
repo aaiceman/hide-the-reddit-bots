@@ -13,7 +13,35 @@
 //      accounts. Every verification adds an anchor, so demand collapses as
 //      calibration builds.
 
-const DEFAULT_SETTINGS = { thresholdDays: 30, showAges: true, hideYoung: true };
+const DEFAULT_SETTINGS = {
+  thresholdDays: 30,
+  showAges: true,
+  suspectedThreshold: 4,
+  almostCertainThreshold: 7,
+  hideSuspected: false,
+  hideAlmostCertain: true,
+  factors: {
+    age: true,
+    karmaAge: true,
+    karmaShape: true,
+    namePattern: true,
+    dupeComment: true,
+    noEmail: true,
+    defaultAvatar: true,
+    emptyProfile: true,
+  },
+};
+
+// Deep-merge stored settings over defaults; migrate v1.x hideYoung.
+function mergeSettings(stored) {
+  const s = { ...DEFAULT_SETTINGS, ...(stored || {}) };
+  s.factors = { ...DEFAULT_SETTINGS.factors, ...((stored && stored.factors) || {}) };
+  if (stored && stored.hideYoung === false && !(stored.factors && "age" in stored.factors)) {
+    s.factors.age = false; // user had disabled young-account hiding
+  }
+  delete s.hideYoung;
+  return s;
+}
 const NEG_CACHE_MS = 60 * 60 * 1000; // retry failed lookups after 1 hour
 const VERIFY_INTERVAL_MS = 7000; // ~8.5 requests/minute, strictly serial
 const BACKOFF_MS = 5 * 60 * 1000; // after a 429 without Retry-After
@@ -99,6 +127,40 @@ function subredditOfThing(thing) {
     return thing.dataset.subreddit.toLowerCase();
   }
   return currentPageSubreddit();
+}
+
+// ----- duplicate-comment detection (per page load, v1.3.0) -------------------
+// normalized body -> { count, users: Set<lowercase author> }
+const dupeBodies = new Map();
+const dupeUsers = new Set(); // authors with a duplicated comment on this page
+
+function normalizeBody(text) {
+  return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function harvestCommentBody(link, lowerName) {
+  const thing = link.closest(".thing");
+  if (!thing || !thing.classList.contains("comment") || thing.dataset.hrbDupe) return;
+  thing.dataset.hrbDupe = "1";
+  const md = thing.querySelector(".usertext-body .md");
+  if (!md) return;
+  const body = normalizeBody(md.textContent || "");
+  if (body.length < 40) return;
+  let rec = dupeBodies.get(body);
+  if (!rec) {
+    rec = { count: 0, users: new Set() };
+    dupeBodies.set(body, rec);
+  }
+  rec.count++;
+  rec.users.add(lowerName);
+  if (rec.count >= 2) {
+    for (const u of rec.users) {
+      if (!dupeUsers.has(u)) {
+        dupeUsers.add(u);
+        renderUser(u); // re-render earlier copies now that the dupe is known
+      }
+    }
+  }
 }
 
 const today = () => Math.floor(Date.now() / 86400000);
@@ -187,6 +249,74 @@ function renderBadge() {
   const pct = seen > 0 ? Math.round((hidden / seen) * 100) : 0;
   badgeEl.querySelector(".hrb-badge-full").textContent =
     `${label} · ${hidden} / ${seen} · ${pct}%`;
+}
+
+// ----- bot score (v1.3.0) ----------------------------------------------------
+// Suggested-username shape: Word_Word_1234 / Word-Word-1234 (optional 2nd sep)
+const NAME_PATTERN_RE = /^[A-Z][a-z]+[_-][A-Z][a-z]+[_-]?\d{1,6}$/;
+
+const FACTOR_POINTS = {
+  age: 7,
+  karmaAgeExtreme: 5,
+  karmaAgeHigh: 3,
+  karmaShape: 3,
+  namePattern: 2,
+  dupeComment: 2,
+  noEmail: 1,
+  defaultAvatar: 1,
+  emptyProfile: 1,
+};
+
+// entry: cache entry ({c, sig}) or undefined; live: {namePattern, dupe} or null.
+// Returns {score, tier, evidence[]}; tier: null | "suspected" | "almost".
+// GATE: a tier requires at least one Strong factor (age / karmaAge / karmaShape).
+function computeBotScore(entry, live) {
+  const f = settings.factors;
+  let score = 0;
+  let strong = false;
+  const evidence = [];
+  const add = (pts, label, isStrong) => {
+    score += pts;
+    if (isStrong) strong = true;
+    evidence.push(`${label} (${pts})`);
+  };
+  const days = entry && entry.c != null ? ageDays(entry.c) : null;
+  if (days != null) {
+    if (f.age && days < settings.thresholdDays) {
+      add(FACTOR_POINTS.age, `account ${days}d old`, true);
+    }
+    const sig = entry.sig;
+    if (sig) {
+      if (f.karmaAge && days < 730) {
+        const perDay = days > 0 ? sig.tk / days : sig.tk;
+        if (perDay >= 1000) {
+          add(FACTOR_POINTS.karmaAgeExtreme, `${Math.round(perDay)} karma/day`, true);
+        } else if (perDay >= 200) {
+          add(FACTOR_POINTS.karmaAgeHigh, `${Math.round(perDay)} karma/day`, true);
+        }
+      }
+      if (f.karmaShape && sig.tk > 10000 && sig.lk > 10 * sig.ck) {
+        add(FACTOR_POINTS.karmaShape, "link-heavy karma", true);
+      }
+      if (f.noEmail && !sig.ve) add(FACTOR_POINTS.noEmail, "no verified email", false);
+      if (f.defaultAvatar && sig.di) add(FACTOR_POINTS.defaultAvatar, "default avatar", false);
+      if (f.emptyProfile && sig.ep) add(FACTOR_POINTS.emptyProfile, "empty profile", false);
+    }
+  }
+  if (live) {
+    if (f.namePattern && live.namePattern) {
+      add(FACTOR_POINTS.namePattern, "suggested username", false);
+    }
+    if (f.dupeComment && live.dupe) {
+      add(FACTOR_POINTS.dupeComment, "duplicate comment", false);
+    }
+  }
+  let tier = null;
+  if (strong) {
+    if (score >= settings.almostCertainThreshold) tier = "almost";
+    else if (score >= settings.suspectedThreshold) tier = "suspected";
+  }
+  return { score, tier, evidence };
 }
 
 // ----- age math / colors -----
@@ -327,9 +457,19 @@ function renderElement(link, state) {
     span.textContent = settings.showAges ? `[${ageText(state.days)}]` : "";
     span.style.color = ageColor(state.days);
   }
-  // only VERIFIED ages may hide
-  const young = state.kind === "verified" && state.days < settings.thresholdDays;
-  setHidden(link, young && settings.hideYoung);
+  // v1.3.0: bot-score markers + tier-based hiding (replaces hideYoung hard rule)
+  const bot = state.bot || { tier: null, score: 0, evidence: [] };
+  if (bot.tier) {
+    const glyph = bot.tier === "almost" ? "\u{1F916}" : "⚠";
+    span.textContent += (span.textContent ? " " : "") + glyph;
+    span.title = `${bot.score} pts: ${bot.evidence.join(" · ")}`;
+  } else {
+    span.title = "";
+  }
+  const hidden =
+    (bot.tier === "almost" && settings.hideAlmostCertain) ||
+    (bot.tier === "suspected" && settings.hideSuspected);
+  setHidden(link, hidden);
 }
 
 function stateFor(name) {
@@ -348,6 +488,17 @@ function renderUser(name) {
   const set = registry.get(name);
   if (!set) return;
   const state = stateFor(name);
+  let displayName = name;
+  for (const l of set) {
+    if (l.isConnected) {
+      displayName = l.textContent.trim();
+      break;
+    }
+  }
+  state.bot = computeBotScore(memCache.get(name), {
+    namePattern: NAME_PATTERN_RE.test(displayName),
+    dupe: dupeUsers.has(name),
+  });
   for (const link of set) {
     if (!link.isConnected) {
       set.delete(link);
@@ -401,6 +552,7 @@ function processNewAuthors() {
     }
     set.add(link);
     harvestIdFromThing(link);
+    harvestCommentBody(link, lower);
     const thing = link.closest(".thing");
     if (thing && !thing.dataset.hrbSeen) {
       thing.dataset.hrbSeen = "1";
@@ -556,6 +708,16 @@ async function verifyUser(name) {
           }
         }
         if (entry.id !== undefined) addAnchor(entry.id, entry.c);
+        // v1.3.0: snapshot bot-score signals (fields verified 2026-07-14 console tests)
+        const sd = d.data.subreddit || {};
+        entry.sig = {
+          lk: d.data.link_karma || 0,
+          ck: d.data.comment_karma || 0,
+          tk: d.data.total_karma || 0,
+          ve: d.data.has_verified_email === true,
+          di: sd.is_default_icon === true,
+          ep: !(sd.public_description && sd.public_description.trim()),
+        };
       }
     }
   } catch (e) {
@@ -603,7 +765,7 @@ async function loadState() {
   const stored = await browser.storage.local.get([
     "settings", "anchors", "meta", "stats", "statsUi",
   ]);
-  settings = { ...DEFAULT_SETTINGS, ...(stored.settings || {}) };
+  settings = mergeSettings(stored.settings);
   if (Array.isArray(stored.anchors)) anchors = stored.anchors;
   entryCount = stored.meta && stored.meta.count ? stored.meta.count : 0;
   stats = stored.stats && typeof stored.stats === "object" ? stored.stats : {};
@@ -613,7 +775,7 @@ async function loadState() {
 browser.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.settings) {
-    settings = { ...DEFAULT_SETTINGS, ...(changes.settings.newValue || {}) };
+    settings = mergeSettings(changes.settings.newValue);
     reapplyAll();
   }
   if (changes.anchors && Array.isArray(changes.anchors.newValue)) {
