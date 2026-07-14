@@ -22,6 +22,15 @@ bots, spammers, and ban evaders — this makes them visible or gone.
   reset button. Counts are cumulative since the last reset and stay on your
   machine. Because only *verified*-young accounts are hidden (estimated ages never
   hide), the rate is deliberately conservative.
+- **Bot score** — accounts earn points across multiple tells: young age (7),
+  extreme karma-for-age (3–5), link-farm karma shape (3), suggested-username
+  pattern (2), duplicate comments on the page (2), plus weak signals (no verified
+  email, default avatar, empty profile — 1 each). At least one strong factor is
+  required before any flag, so weak signals alone never mark anyone. Suspected
+  bots (default ≥4 pts) get a ⚠ marker; almost-certain bots (default ≥7 pts) are
+  hidden by default. Both thresholds are sliders, every factor can be excluded,
+  and hovering the marker shows the exact evidence. Scores use data snapshotted
+  when an account was verified — no extra requests, ever.
 - Coexists with Reddit Enhancement Suite (labels also appear on content loaded by
   RES never-ending scroll)
 
@@ -37,8 +46,10 @@ modern React UI is not supported.
 | Setting | Default |
 |---|---|
 | Show account-age labels | on |
-| Hide posts/comments from young accounts | on |
 | Threshold (days) | 30 |
+| Hide almost-certain bots (slider, pts) | on, 7 |
+| Hide suspected bots (slider, pts) | off, 4 |
+| Bot-score factors (8 checkboxes) | all on |
 
 ## Install
 
