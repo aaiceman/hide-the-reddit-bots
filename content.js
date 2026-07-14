@@ -624,6 +624,16 @@ async function verifyUser(name) {
           }
         }
         if (entry.id !== undefined) addAnchor(entry.id, entry.c);
+        // v1.3.0: snapshot bot-score signals (fields verified 2026-07-14 console tests)
+        const sd = d.data.subreddit || {};
+        entry.sig = {
+          lk: d.data.link_karma || 0,
+          ck: d.data.comment_karma || 0,
+          tk: d.data.total_karma || 0,
+          ve: d.data.has_verified_email === true,
+          di: sd.is_default_icon === true,
+          ep: !(sd.public_description && sd.public_description.trim()),
+        };
       }
     }
   } catch (e) {
