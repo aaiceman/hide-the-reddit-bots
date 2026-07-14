@@ -101,6 +101,40 @@ function subredditOfThing(thing) {
   return currentPageSubreddit();
 }
 
+// ----- duplicate-comment detection (per page load, v1.3.0) -------------------
+// normalized body -> { count, users: Set<lowercase author> }
+const dupeBodies = new Map();
+const dupeUsers = new Set(); // authors with a duplicated comment on this page
+
+function normalizeBody(text) {
+  return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function harvestCommentBody(link, lowerName) {
+  const thing = link.closest(".thing");
+  if (!thing || !thing.classList.contains("comment") || thing.dataset.hrbDupe) return;
+  thing.dataset.hrbDupe = "1";
+  const md = thing.querySelector(".usertext-body .md");
+  if (!md) return;
+  const body = normalizeBody(md.textContent || "");
+  if (body.length < 40) return;
+  let rec = dupeBodies.get(body);
+  if (!rec) {
+    rec = { count: 0, users: new Set() };
+    dupeBodies.set(body, rec);
+  }
+  rec.count++;
+  rec.users.add(lowerName);
+  if (rec.count >= 2) {
+    for (const u of rec.users) {
+      if (!dupeUsers.has(u)) {
+        dupeUsers.add(u);
+        renderUser(u); // re-render earlier copies now that the dupe is known
+      }
+    }
+  }
+}
+
 const today = () => Math.floor(Date.now() / 86400000);
 const safeOldDays = () => Math.max(SAFE_OLD_BASE_DAYS, settings.thresholdDays * 2);
 
@@ -469,6 +503,7 @@ function processNewAuthors() {
     }
     set.add(link);
     harvestIdFromThing(link);
+    harvestCommentBody(link, lower);
     const thing = link.closest(".thing");
     if (thing && !thing.dataset.hrbSeen) {
       thing.dataset.hrbSeen = "1";
