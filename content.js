@@ -171,7 +171,8 @@ const style = document.createElement("style");
 style.textContent = `
   .hrb-hidden { display: none !important; }
   .hrb-age { font-size: 0.85em; margin-left: 4px; font-weight: bold; }
-  .hrb-age-chip { display: block; margin: 0; padding: 2px 8px 0; }
+  .hrb-age-chip { display: inline-block; position: relative; z-index: 10;
+    margin: 0; padding: 2px 8px 0; }
   #hrb-badge { position: fixed; bottom: 12px; right: 12px; z-index: 2147483646;
     background: #1a1a1b; color: #d7dadc; border: 1px solid #474748;
     border-radius: 8px; font: 12px/1.3 -apple-system, system-ui, sans-serif;
@@ -460,33 +461,38 @@ function setHidden(link, hidden) {
 // state: {kind: "pending"|"unknown"|"verified"|"estimated", days?, floor?}
 function renderElement(link, state) {
   const span = ensureSpan(link);
+  const chip = span.classList.contains("hrb-age-chip");
+  let label = "";
+  let color = "#888888";
   if (!settings.showAges && state.kind !== "verified") {
-    span.textContent = "";
+    label = "";
   } else if (state.kind === "pending") {
-    span.textContent = "[…]";
-    span.style.color = "#888888";
+    label = "[…]";
   } else if (state.kind === "unknown") {
-    span.textContent = "[?]";
-    span.style.color = "#888888";
+    label = "[?]";
   } else if (state.kind === "estimated") {
-    span.textContent = settings.showAges
-      ? `[~${ageText(state.days)}${state.floor ? "+" : ""}]`
-      : "";
-    span.style.color = ageColor(state.days);
+    label = settings.showAges ? `[~${ageText(state.days)}${state.floor ? "+" : ""}]` : "";
+    color = ageColor(state.days);
   } else {
     // verified
-    span.textContent = settings.showAges ? `[${ageText(state.days)}]` : "";
-    span.style.color = ageColor(state.days);
+    label = settings.showAges ? `[${ageText(state.days)}]` : "";
+    color = ageColor(state.days);
   }
   // v1.3.0: bot-score markers + tier-based hiding (replaces hideYoung hard rule)
   const bot = state.bot || { tier: null, score: 0, evidence: [] };
-  if (bot.tier) {
-    const glyph = bot.tier === "almost" ? "\u{1F916}" : "⚠";
-    span.textContent += (span.textContent ? " " : "") + glyph;
-    span.title = `${bot.score} pts: ${bot.evidence.join(" · ")}`;
-  } else {
-    span.title = "";
+  const marker = bot.tier ? (bot.tier === "almost" ? "\u{1F916}" : "⚠") : "";
+  // On shreddit feed cards Reddit shows no author byline, so the chip carries the
+  // username itself; a lone username (nothing else to show) is suppressed.
+  const author = chip && link.getAttribute ? link.getAttribute("author") : "";
+  const parts = [];
+  if (label || marker) {
+    if (author) parts.push("u/" + author);
+    if (label) parts.push(label);
+    if (marker) parts.push(marker);
   }
+  span.textContent = parts.join(" ");
+  span.style.color = color;
+  span.title = bot.tier ? `${bot.score} pts: ${bot.evidence.join(" · ")}` : "";
   const hidden =
     (bot.tier === "almost" && settings.hideAlmostCertain) ||
     (bot.tier === "suspected" && settings.hideSuspected);
